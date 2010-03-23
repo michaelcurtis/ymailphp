@@ -45,12 +45,12 @@
 			$request->method = $method;
 			$request->params = $arguments;
 			
+			// Fetch the OAuth token
+			$tok = $this->__oauth_get_token();
+			
 			// Create a loop around the cascade request in case 
 			// the access token needs to be refreshed. 
 			for($attemptNo = 0; $attemptNo < 2; $attemptNo++) {	
-				
-				$tok = $this->__oauth_get_token();
-				
 				// Use the access token to create an oauth header
 				$oaRequestHeader = $this->__get_oauth_header($tok);
 				
@@ -59,7 +59,10 @@
 				curl_setopt($ch, CURLOPT_POST, 1);
 				curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($request));
 				curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-				curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type: application/json', $oaRequestHeader));
+				curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+					'Content-Type: application/json', $oaRequestHeader,
+					'Accept: application/json'
+				));
 				$rawresponse = curl_exec($ch);
 				$responseCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 				$responseContentType = curl_getinfo($ch, CURLINFO_CONTENT_TYPE);			
@@ -70,17 +73,11 @@
 						// An empty response was returned. :(
 						throw new YMClientException("Empty response", 0, "The Ymail webservice returned an empty response");
 					}
-								
-					if(property_exists($response, "error") && !is_null($response->error)) {
-						// Cascade returned an error. 
-						if($response->error == "Client.ExpiredCredentials") {							
-							$this->_oauth_refresh_access_token($tok);
-						}
 					
-						else {
-							// It was an error that we don't know how to handle, pass it along. 
-							throw new YMClientException($response->error->message, $response->error->code, $response->error->detail);
-						}
+					if($responseCode == 401) {
+						// We received an "Unauthorized" response. Refresh the access token
+						// and update $tok with the new token.
+						$tok = $this->__oauth_refresh_access_token($tok);
 					}
 					
 					else {
@@ -91,28 +88,8 @@
 				}
 			
 				else {
-					// Some kind of invalid response was returned from the webservice (like
-					// HTML). There is a bug in the ymail webservice that causes it to throw
-					// a 999 error when OAuth access tokens expire. Typically 999 means that 
-					// the client has crossed rate limits. 
-					
-					//FIXME: remove this when ymail fixes the above referenced bug
-					if($responseCode == 999) {						
-						// Refresh the access token and try again
-						$this->_oauth_refresh_access_token($tok);
-					}
-					
-					// Huge hack! Ymail API is returning an XML error when the access token 
-					// expires even though the request was for JSON. 
-					//FIXME: remove this when Cascade fixes their shit. 
-					else if(preg_match("/token_expired/", $rawresponse)) {
-						// The OAuth credentials expired, refresh them.
-						$this->_oauth_refresh_access_token($tok);
-					}
-					
-					else {
-						throw new YMClientException("Cascade request failed", $responseCode, "Bad response from Cascade: HTTP $responseCode, Content-Type: $responseContentType");
-					}
+					// Cascade returned a malformed response. Forward along info about it.
+					throw new YMClientException("Cascade request failed", $responseCode, "Bad response from Cascade: HTTP $responseCode, Content-Type: $responseContentType");
 				}
 			}
 		}
@@ -147,40 +124,40 @@
 			}
 		}
 		
-		private function __oauth_get_access_token($rtok) {
+		private function __oauth_get_access_token($tok) {
 			$oaReqParams = array(
 				'oauth_nonce' => OAuthRequest::generate_nonce(),
 				'oauth_timestamp' => OAuthRequest::generate_timestamp(),
 				'oauth_consumer_key' => $this->oaConsumerKey,
 				'oauth_version' => '1.0',
 				'oauth_signature_method' => 'PLAINTEXT', //'HMAC-SHA1' //FIXME: Even needed??
-				'oauth_token' => $rtok['oauth_token']
+				'oauth_token' => $tok['oauth_token']
 			);
 			
 			// If the passed token has a verifier add it to the OAuth parameters. This
 			// only happens when requesting a new access token (instead of doing a refresh 
 			// on an existing access token which don't have verifiers)
-			if(isset($rtok['oauth_verifier'])) {
-				$oaReqParams['oauth_verifier'] = $rtok['oauth_verifier'];
+			if(isset($tok['oauth_verifier'])) {
+				$oaReqParams['oauth_verifier'] = $tok['oauth_verifier'];
 			}
 			
 			// If the passed token has a session handle add it to the OAuth parameters. 
 			// This happens when we are refreshing an access token. 
-			if(isset($rtok['oauth_session_handle'])) {
-				$oaReqParams['oauth_session_handle'] = $rtok['oauth_session_handle'];
+			if(isset($tok['oauth_session_handle'])) {
+				$oaReqParams['oauth_session_handle'] = $tok['oauth_session_handle'];
 			}
 			
 			// Do the request
 			$request = new OAuthRequest('GET', (OAUTH2_ENDPOINT_URL . "/get_token"), $oaReqParams);
-			$url = $request->to_url() . '&oauth_signature=' . $this->oaConsumerSecret . '%26' . $rtok['oauth_token_secret'];
+			$url = $request->to_url() . '&oauth_signature=' . $this->oaConsumerSecret . '%26' . $tok['oauth_token_secret'];
 			$ch = curl_init();
 			curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
 			curl_setopt($ch, CURLOPT_URL, $url);
 			$resp = curl_exec($ch);
 			curl_close($ch);
-			parse_str($resp, $tok);
+			parse_str($resp, $newtok);
 									
-			if(!$tok['oauth_token'] || !$tok['oauth_token_secret']) {				
+			if(!$newtok['oauth_token'] || !$newtok['oauth_token_secret']) {				
 				throw new YMClientException($resp, 0);	
 			}
 			
@@ -188,8 +165,8 @@
 			setcookie(REQUEST_TOKEN_COOKIE_NAME, "", time()-3600);
 						
 			// Persist the new access token in a cookie and return it.
-			setcookie(ACCESS_TOKEN_COOKIE_NAME, $this->__oauth_token_to_query_string($tok));			
-			return $tok;
+			setcookie(ACCESS_TOKEN_COOKIE_NAME, $this->__oauth_token_to_query_string($newtok));			
+			return $newtok;
 		}
 		
 		private function __oauth_get_request_token() {
@@ -221,7 +198,7 @@
 			header("Location: $loginURL");
 		}
 		
-		private function _oauth_refresh_access_token($tok) {			
+		private function __oauth_refresh_access_token($tok) {			
 			if(!isset($tok['oauth_session_handle'])) {
 				throw new YMClientException("Cannot refresh access token without a session handle.", 0);
 			}
