@@ -155,3 +155,9 @@ url constants to try it out.
 	        }
 	    }
 	?>
+
+# Notes
+
+Authored by Mike Curtis - [http://twitter.com/mikecurtis](http://twitter.com/mikecurtis)
+
+Mostly a port of [PyCascade](http://github.com/pgriess/PyCascade) by [Peter Griess](http://github.com/pgriess)
