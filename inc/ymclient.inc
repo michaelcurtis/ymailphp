@@ -1,67 +1,41 @@
 <?php
-/**
- * The MIT License
- * 
- * Copyright (c) 2008 OAuth.net
- * 
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- * 
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- * 
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- * THE SOFTWARE.
- * 
- */
-
 	require_once realpath(dirname(__FILE__)) . "/OAuth.php";
 	
 	define('JSON11_ENDPOINT_URL', 'http://mail.yahooapis.com/ws/mail/v1.1/jsonrpc');
 	define('OAUTH2_ENDPOINT_URL', 'https://api.login.yahoo.com/oauth/v2');
-	define('REQUEST_TOKEN_COOKIE_NAME', 'rt');
-	define('ACCESS_TOKEN_COOKIE_NAME', 'at');
 	
 	class YMClient {
 		
-		function __construct($oaConsumerKey, $oaConsumerSecret, $callbackURL) {			
+		function __construct($oaConsumerKey, $oaConsumerSecret) {			
 			$this->oaConsumerKey = $oaConsumerKey;
 			$this->oaConsumerSecret = $oaConsumerSecret;
-			$this->callbackURL = $callbackURL;
 			$this->signature = new OAuthSignatureMethod_HMAC_SHA1();
 		}
 		
 		function __call($method, $arguments) {
+			$this->oaRefreshedToken = null;
+			
+			list ($params, $tok) = $arguments;
+			
+			if(!$tok) {
+				throw new YMClientException("Missing oauth access token", 0, null);
+			}
+			
 			$request = new stdclass();
 			$request->method = $method;
-			$request->params = $arguments;
-			
-			// Fetch the OAuth token
-			$tok = $this->__oauth_get_token();
+			$request->params = $params;
 			
 			// Create a loop around the cascade request in case 
 			// the access token needs to be refreshed. 
-			for($attemptNo = 0; $attemptNo < 2; $attemptNo++) {	
-				// Use the access token to create an oauth header
-				$oaRequestHeader = $this->__get_oauth_header($tok);
-				
-				// Make the cascade request
+			for($attemptNo = 0; $attemptNo < 2; $attemptNo++) {
 				$ch = curl_init(JSON11_ENDPOINT_URL);
 				curl_setopt($ch, CURLOPT_POST, 1);
 				curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($request));
 				curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
 				curl_setopt($ch, CURLOPT_HTTPHEADER, array(
-					'Content-Type: application/json', $oaRequestHeader,
-					'Accept: application/json'
+					'Content-Type: application/json', 
+					'Accept: application/json',
+					$this->__build_oauth_header($tok)
 				));
 				$rawresponse = curl_exec($ch);
 				$responseCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -70,18 +44,16 @@
 				
 				if($responseContentType === "application/json") {
 					if($rawresponse == "") {
-						// An empty response was returned. :(
 						throw new YMClientException("Empty response", 0, "The Ymail webservice returned an empty response");
 					}
 					
+					// Cascade returned an "unauthorized" response. Try to refresh the access token
 					if($responseCode == 401) {
-						// We received an "Unauthorized" response. Refresh the access token
-						// and update $tok with the new token.
 						$tok = $this->__oauth_refresh_access_token($tok);
+						$this->oaRefreshedToken = $tok;
 					}
 					
 					else {
-						// Return the response.
 						$response = json_decode($rawresponse);
 						return $response->result;
 					}
@@ -89,42 +61,12 @@
 			
 				else {
 					// Cascade returned a malformed response. Forward along info about it.
-					throw new YMClientException("Cascade request failed", $responseCode, "Bad response from Cascade: HTTP $responseCode, Content-Type: $responseContentType");
+					throw new YMClientException("Ymail request failed", $responseCode, "Bad response from Ymail: HTTP $responseCode, Content-Type: $responseContentType");
 				}
 			}
 		}
 		
-		private function __oauth_get_token() {
-			// We already have an access token stashed in a cookie. 
-			if($_COOKIE[ACCESS_TOKEN_COOKIE_NAME]) {
-				parse_str($_COOKIE[ACCESS_TOKEN_COOKIE_NAME], $tokens);
-				return $tokens;
-			}
-			
-			// We have already acquired a request token and are now handling 
-			// a redirect back to the app. We can use the query params passed
-			// to us to mint a new access token. 
-			else if($_COOKIE[REQUEST_TOKEN_COOKIE_NAME] && $_REQUEST['oauth_verifier'] && $_REQUEST['oauth_token']) {
-				$tok = $this->__oauth_token_from_query_string($_COOKIE[REQUEST_TOKEN_COOKIE_NAME]);
-				
-				// Make sure the token from the callback matches the cookie
-				if($tok['oauth_token'] != $_REQUEST['oauth_token']) {
-					throw new YMClientException("Cookie and URL disagree about request token value", 0);
-				}
-				
-				$tok['oauth_verifier'] = $_REQUEST['oauth_verifier'];
-													
-				return $this->__oauth_get_access_token($tok);
-			}
-			
-			// We have not acquired a request token yet (the user has not)
-			// granted our application access to their data yet. 
-			else {
-				$this->__oauth_get_request_token();
-			}
-		}
-		
-		private function __oauth_get_access_token($tok) {
+		function oauth_get_access_token($tok) {
 			$oaReqParams = array(
 				'oauth_nonce' => OAuthRequest::generate_nonce(),
 				'oauth_timestamp' => OAuthRequest::generate_timestamp(),
@@ -158,25 +100,20 @@
 			parse_str($resp, $newtok);
 									
 			if(!$newtok['oauth_token'] || !$newtok['oauth_token_secret']) {				
-				throw new YMClientException($resp, 0);	
+				throw new YMClientException("Access token request failed", 0, $resp);	
 			}
 			
-			// Expire our request token cookie. Don't need it anymore. 
-			setcookie(REQUEST_TOKEN_COOKIE_NAME, "", time()-3600);
-						
-			// Persist the new access token in a cookie and return it.
-			setcookie(ACCESS_TOKEN_COOKIE_NAME, $this->__oauth_token_to_query_string($newtok));			
 			return $newtok;
 		}
 		
-		private function __oauth_get_request_token() {
+		function oauth_get_request_token($callbackURL) {
 			$request = new OAuthRequest('GET', (OAUTH2_ENDPOINT_URL . "/get_request_token"), array(
 				'oauth_nonce' => OAuthRequest::generate_nonce(),
 				'oauth_timestamp' => OAuthRequest::generate_timestamp(),
 				'oauth_version' => '1.0',
 				'oauth_signature_method' => 'HMAC-SHA1',
 				'oauth_consumer_key' => $this->oaConsumerKey,
-				'oauth_callback' => $this->callbackURL));
+				'oauth_callback' => $callbackURL));
 			
 			$url = $request->to_url() . "&oauth_signature=" . $this->signature->build_signature($request, new OAuthConsumer('', $this->oaConsumerSecret), NULL);
 			
@@ -185,33 +122,26 @@
 			curl_setopt($ch, CURLOPT_URL, $url);
 			$resp = curl_exec($ch);
 			curl_close($ch);
-			parse_str($resp, $tokens);
-			if(!$tokens['oauth_token'] || !$tokens['oauth_token_secret']) {				
-				throw new YMClientException($resp, 0);	
+			parse_str($resp, $tok);
+			if(!$tok['oauth_token'] || !$tok['oauth_token_secret']) {				
+				throw new YMClientException("Request token request failed", 0, $resp);	
 			}
 			
-			$tok = new OAuthToken($tokens['oauth_token'], $tokens['oauth_token_secret']);
-						
-			// Set a cookie with the request token/secret then redirect...
-			setcookie(REQUEST_TOKEN_COOKIE_NAME, $tok->to_string());
-			$loginURL = OAUTH2_ENDPOINT_URL . "/request_auth?oauth_token=" . $tokens['oauth_token'];
-			header("Location: $loginURL");
+			return array($tok, (OAUTH2_ENDPOINT_URL . "/request_auth?oauth_token=" . $tok['oauth_token']));
 		}
 		
-		private function __oauth_refresh_access_token($tok) {			
-			if(!isset($tok['oauth_session_handle'])) {
-				throw new YMClientException("Cannot refresh access token without a session handle.", 0);
+		function oauth_get_refreshed_token() {
+			if($this->oaRefreshedToken) {
+				return $this->oaRefreshedToken;
 			}
-						
-			return $this->__oauth_get_access_token($tok);
 		}
 		
-		private function __oauth_token_from_query_string($s) {
+		public static function oauth_token_from_query_string($s) {
 			parse_str($s, $tokens);
 			return $tokens;
 		}
 		
-		private function __oauth_token_to_query_string($tok) {
+		public static function oauth_token_to_query_string($tok) {
 			$a = array();
 			foreach($tok as $k => $v) {
 				array_push($a, ("$k=" . OAuthUtil::urlencodeRFC3986($v)));
@@ -220,7 +150,15 @@
 			return implode("&", $a);
 		}
 		
-		private function __get_oauth_header($tok) {
+		private function __oauth_refresh_access_token($tok) {
+			if(!isset($tok['oauth_session_handle'])) {
+				throw new YMClientException("Failed to refresh access token without a session handle.", 0, null);
+			}
+			
+			return $this->oauth_get_access_token($tok);
+		}
+		
+		private function __build_oauth_header($tok) {
 			$request = new OAuthRequest('POST', JSON11_ENDPOINT_URL, array(
 				'oauth_nonce' => OAuthRequest::generate_nonce(),
 				'oauth_timestamp' => OAuthRequest::generate_timestamp(),
