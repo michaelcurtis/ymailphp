@@ -47,14 +47,24 @@
 						throw new YMClientException("Empty response", 0, "The Ymail webservice returned an empty response");
 					}
 					
+					$response = json_decode($rawresponse);
+					
 					// Cascade returned an "unauthorized" response. Try to refresh the access token
 					if($responseCode == 401) {
-						$tok = $this->__oauth_refresh_access_token($tok);
-						$this->oaRefreshedToken = $tok;
+						
+						// The token expired, attempt to refresh it
+						if(isset($response->error->description) && preg_match("/token_expired/", $response->error->description)) {
+							$tok = $this->__oauth_refresh_access_token($tok);
+							$this->oaRefreshedToken = $tok;
+						}
+						
+						// Some other error occured. Forward along info about it.
+						else {
+							throw new YMClientException("Ymail request failed", $responseCode, $response);
+						}
 					}
 					
 					else {
-						$response = json_decode($rawresponse);
 						return $response->result;
 					}
 				}
