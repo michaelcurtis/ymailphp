@@ -15,7 +15,7 @@ instance and make subsequent method calls that mirror the web service APIs. The 
 code snippet will construct a `YMClient` and use it to print the folder list for a mailbox.
 
     <?php
-        require_once 'inc/ymclient.inc';
+        require_once 'ymclient.inc';
 
         $ymc = new YMClient(
 		    OAUTH_CONSUMER_KEY,
@@ -61,7 +61,7 @@ with information about the first ten messages. Set your own consumer key, secret
 url constants to try it out.
 
 	<?php
-	    require_once 'inc/ymclient.inc';
+	    require_once 'ymclient.inc';
 
 	    define(OA_CONSUMER_KEY, "...");
 	    define(OA_CONSUMER_SECRET, "...");
