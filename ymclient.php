@@ -125,7 +125,7 @@
 				'oauth_consumer_key' => $this->oaConsumerKey,
 				'oauth_callback' => $callbackURL));
 			
-			$url = $request->to_url() . "&oauth_signature=" . $this->signature->build_signature($request, new OAuthConsumer('', $this->oaConsumerSecret), NULL);
+			$url = $request->to_url() . "&oauth_signature=" . urlencode($this->signature->build_signature($request, new OAuthConsumer('', $this->oaConsumerSecret), NULL));
 			
 			$ch = curl_init();
 			curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
